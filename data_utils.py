@@ -330,7 +330,7 @@ class WasteDatasetPreprocessor:
         # Find the dataset folder (might be nested)
         data_folder = None
         for root, dirs, files in os.walk(dataset_dir):
-            if "plastic" in dirs or "paper" in dirs or "metal" in dirs:
+            if "battery" in dirs or "biological" in dirs or "clothes" in dirs:
                 data_folder = root
                 break
         
@@ -358,7 +358,7 @@ class WasteDatasetPreprocessor:
                     continue
                 
                 src_path = os.path.join(class_dir, filename)
-                dst_path = os.path.join(self.output_dir, f"waste_{filename}")
+                dst_path = os.path.join(self.output_dir, f"waste_pictures_{filename}")
                 
                 # Copy file to output directory
                 shutil.copy(src_path, dst_path)
@@ -381,21 +381,9 @@ class WasteDatasetPreprocessor:
         Returns:
             List of processed image metadata
         """
-        dataset_dir = os.path.join(self.data_dir, "open-images")
-        if not os.path.exists(dataset_dir):
-            print(f"Open Images dataset not found at: {dataset_dir}")
-            return []
-        
-        # Find the OIDv4 toolkit folder
-        oidv4_dir = os.path.join(dataset_dir, "OIDv4_ToolKit")
-        if not os.path.exists(oidv4_dir):
-            print("Could not find OIDv4_ToolKit folder")
-            return []
-        
-        # Find the downloaded images
-        download_dir = os.path.join(oidv4_dir, "OID", "Dataset")
+        download_dir = os.path.join(self.data_dir, "open-images")
         if not os.path.exists(download_dir):
-            print("Could not find downloaded Open Images dataset")
+            print(f"Open Images dataset not found at: {download_dir}")
             return []
         
         print(f"Processing Open Images dataset from: {download_dir}")
@@ -440,6 +428,44 @@ class WasteDatasetPreprocessor:
         print(f"Processed {len(metadata)} images from Open Images")
         return metadata
     
+    def process_all_datasets(self):
+        """
+        Process all available datasets and create train/val/test splits.
+        
+        Returns:
+            Dictionary with train/val/test splits
+        """
+        # Process each dataset and collect metadata
+        all_metadata = []
+        
+        # Process TrashNet
+        trashnet_metadata = self.preprocess_trashnet()
+        all_metadata.extend(trashnet_metadata)
+        
+        # Process TACO
+        taco_metadata = self.preprocess_taco()
+        all_metadata.extend(taco_metadata)
+        
+        # Process MJU-Waste
+        mju_waste_metadata = self.preprocess_mju_waste()
+        all_metadata.extend(mju_waste_metadata)
+        
+        # Process Waste-Pictures
+        waste_pictures_metadata = self.preprocess_waste_pictures()
+        all_metadata.extend(waste_pictures_metadata)
+        
+        # Process Open Images
+        open_images_metadata = self.preprocess_open_images()
+        all_metadata.extend(open_images_metadata)
+        
+        # Create dataset splits
+        if all_metadata:
+            print(f"Total processed images: {len(all_metadata)}")
+            return self.create_dataset_splits(all_metadata)
+        else:
+            print("No images were processed. Check dataset paths.")
+            return None
+    
     def create_dataset_splits(self, metadata, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15):
         """
         Create train/val/test splits from metadata.
@@ -456,4 +482,168 @@ class WasteDatasetPreprocessor:
         # Shuffle metadata
         random.shuffle(metadata)
         
-        # Group by <response clipped><NOTE>To save on context only part of this file has been shown to you. You should retry this tool after you have searched inside the file with `grep -n` in order to find the line numbers of what you are looking for.</NOTE>
+        # Group by class
+        class_groups = {}
+        for item in metadata:
+            class_name = item["class"]
+            if class_name not in class_groups:
+                class_groups[class_name] = []
+            class_groups[class_name].append(item)
+        
+        # Create stratified splits
+        train_data = []
+        val_data = []
+        test_data = []
+        
+        for class_name, items in class_groups.items():
+            # Calculate split sizes
+            n_items = len(items)
+            n_train = int(n_items * train_ratio)
+            n_val = int(n_items * val_ratio)
+            
+            # Split data
+            train_data.extend(items[:n_train])
+            val_data.extend(items[n_train:n_train+n_val])
+            test_data.extend(items[n_train+n_val:])
+        
+        # Shuffle again
+        random.shuffle(train_data)
+        random.shuffle(val_data)
+        random.shuffle(test_data)
+        
+        # Create splits dictionary
+        splits = {
+            "train": train_data,
+            "val": val_data,
+            "test": test_data
+        }
+        
+        # Save splits to file
+        splits_file = os.path.join(self.output_dir, "splits.json")
+        with open(splits_file, 'w') as f:
+            json.dump(splits, f, indent=2)
+        
+        print(f"Created dataset splits: {len(train_data)} train, {len(val_data)} val, {len(test_data)} test")
+        print(f"Saved splits to: {splits_file}")
+        
+        return splits
+
+class WasteDataset(Dataset):
+    """Dataset for waste classification."""
+    
+    def __init__(self, data_dir, split="train", transform=None):
+        """
+        Initialize the dataset.
+        
+        Args:
+            data_dir: Directory containing the processed data
+            split: Data split to use (train, val, test)
+            transform: Transforms to apply to images
+        """
+        self.data_dir = data_dir
+        self.split = split
+        self.transform = transform
+        
+        # Load splits
+        splits_file = os.path.join(data_dir, "splits.json")
+        if not os.path.exists(splits_file):
+            raise FileNotFoundError(f"Splits file not found: {splits_file}")
+        
+        with open(splits_file, 'r') as f:
+            splits = json.load(f)
+        
+        self.data = splits[split]
+        
+        # Get class names
+        self.classes = sorted(list(set(item["class"] for item in self.data)))
+        self.class_to_idx = {cls: i for i, cls in enumerate(self.classes)}
+        
+        print(f"Loaded {len(self.data)} images for {split} split")
+        print(f"Classes: {self.classes}")
+    
+    def __len__(self):
+        """Return the number of items in the dataset."""
+        return len(self.data)
+    
+    def __getitem__(self, idx):
+        """
+        Get an item from the dataset.
+        
+        Args:
+            idx: Index of the item
+            
+        Returns:
+            Tuple of (image, label)
+        """
+        item = self.data[idx]
+        image_file = os.path.join(self.data_dir, item["file"])
+        
+        # Load image
+        image = Image.open(image_file).convert("RGB")
+        
+        # Apply transforms
+        if self.transform:
+            image = self.transform(image)
+        
+        # Get label
+        label = self.class_to_idx[item["class"]]
+        
+        return image, label
+
+def get_data_loaders(data_dir, batch_size=32, image_size=224, num_workers=4):
+    """
+    Get data loaders for training and validation.
+    
+    Args:
+        data_dir: Directory containing the processed data
+        batch_size: Batch size
+        image_size: Image size
+        num_workers: Number of workers for data loading
+        
+    Returns:
+        Dictionary with train, val, and test data loaders
+    """
+    # Define transforms
+    train_transform = transforms.Compose([
+        transforms.Resize((image_size, image_size)),
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomRotation(15),
+        transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.1),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+    
+    val_transform = transforms.Compose([
+        transforms.Resize((image_size, image_size)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+    
+    # Create datasets
+    train_dataset = WasteDataset(data_dir, split="train", transform=train_transform)
+    val_dataset = WasteDataset(data_dir, split="val", transform=val_transform)
+    test_dataset = WasteDataset(data_dir, split="test", transform=val_transform)
+    
+    # Create data loaders
+    train_loader = DataLoader(
+        train_dataset, batch_size=batch_size, shuffle=True,
+        num_workers=num_workers, pin_memory=True
+    )
+    
+    val_loader = DataLoader(
+        val_dataset, batch_size=batch_size, shuffle=False,
+        num_workers=num_workers, pin_memory=True
+    )
+    
+    test_loader = DataLoader(
+        test_dataset, batch_size=batch_size, shuffle=False,
+        num_workers=num_workers, pin_memory=True
+    )
+    
+    # Return data loaders
+    return {
+        "train": train_loader,
+        "val": val_loader,
+        "test": test_loader,
+        "classes": train_dataset.classes
+    }
